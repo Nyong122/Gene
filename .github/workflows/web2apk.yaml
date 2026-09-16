@@ -1,0 +1,231 @@
+name: Web2APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "URL website (http:// atau https://)"
+        required: true
+        type: string
+
+      app_name:
+        description: "Nama aplikasi"
+        required: false
+        default: "Web2APK"
+        type: string
+
+      package_name:
+        description: "Package name"
+        required: false
+        default: "com.web2apk.app"
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate URL
+        shell: bash
+        run: |
+          URL="${{ inputs.url }}"
+
+          if [[ ! "$URL" =~ ^https?:// ]]; then
+            echo "ERROR: URL harus diawali http:// atau https://"
+            exit 1
+          fi
+
+          echo "WEB_URL=$URL" >> "$GITHUB_ENV"
+          echo "URL valid: $URL"
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Accept Android licenses
+        run: yes | sdkmanager --licenses || true
+
+      - name: Generate WebView project
+        shell: bash
+        run: |
+          APP_NAME="${{ inputs.app_name }}"
+          PACKAGE="${{ inputs.package_name }}"
+
+          mkdir -p web2apk/app/src/main/java/${PACKAGE//./\/}
+          mkdir -p web2apk/app/src/main/res/values
+
+          cat > web2apk/settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+
+          rootProject.name = "Web2APK"
+          include(":app")
+          EOF
+
+          cat > web2apk/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.5.2' apply false
+          }
+          EOF
+
+          cat > web2apk/app/build.gradle <<EOF
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace '${PACKAGE}'
+              compileSdk 35
+
+              defaultConfig {
+                  applicationId '${PACKAGE}'
+                  minSdk 23
+                  targetSdk 35
+                  versionCode 1
+                  versionName "1.0"
+              }
+          }
+
+          dependencies {
+              implementation 'androidx.appcompat:appcompat:1.7.0'
+              implementation 'androidx.webkit:webkit:1.12.1'
+          }
+          EOF
+
+          cat > web2apk/app/src/main/res/values/strings.xml <<EOF
+          <resources>
+              <string name="app_name">${APP_NAME}</string>
+          </resources>
+          EOF
+
+          cat > web2apk/app/src/main/AndroidManifest.xml <<EOF
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET"/>
+
+              <application
+                  android:theme="@style/AppTheme"
+                  android:label="@string/app_name"
+                  android:usesCleartextTraffic="true">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+
+                  </activity>
+              </application>
+
+          </manifest>
+          EOF
+
+          cat > web2apk/app/src/main/res/values/styles.xml <<'EOF'
+          <resources>
+              <style name="AppTheme"
+                     parent="android:style/Theme.Material.Light.NoActionBar">
+                  <item name="android:fontFamily">sans</item>
+                  <item name="android:windowActionModeOverlay">true</item>
+              </style>
+          </resources>
+          EOF
+
+          cat > web2apk/app/src/main/java/${PACKAGE//./\/}/MainActivity.java <<EOF
+          package ${PACKAGE};
+
+          import android.annotation.SuppressLint;
+          import android.app.Activity;
+          import android.os.Bundle;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+
+          public class MainActivity extends Activity {
+
+              private WebView webView;
+
+              @SuppressLint("SetJavaScriptEnabled")
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+
+                  webView = new WebView(this);
+                  setContentView(webView);
+
+                  WebSettings settings = webView.getSettings();
+
+                  settings.setJavaScriptEnabled(true);
+                  settings.setDomStorageEnabled(true);
+                  settings.setDatabaseEnabled(true);
+                  settings.setLoadWithOverviewMode(true);
+                  settings.setUseWideViewPort(true);
+                  settings.setBuiltInZoomControls(false);
+                  settings.setDisplayZoomControls(false);
+
+                  webView.setWebViewClient(new WebViewClient());
+
+                  webView.loadUrl("${WEB_URL}");
+              }
+
+              @Override
+              public void onBackPressed() {
+                  if (webView.canGoBack()) {
+                      webView.goBack();
+                  } else {
+                      super.onBackPressed();
+                  }
+              }
+          }
+          EOF
+
+      - name: Generate Gradle wrapper
+        working-directory: web2apk
+        run: gradle wrapper --gradle-version 8.7
+
+      - name: Build APK
+        working-directory: web2apk
+        run: ./gradlew assembleRelease --stacktrace --info
+
+      - name: Collect APK
+        shell: bash
+        run: |
+          mkdir -p output
+          find web2apk/app/build/outputs/apk -type f -name "*.apk" \
+            -exec cp {} output/Web2APK.apk \;
+
+          if [ ! -f output/Web2APK.apk ]; then
+            echo "ERROR: APK tidak ditemukan"
+            exit 1
+          fi
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Web2APK
+          path: output/Web2APK.apk
+          if-no-files-found: error
